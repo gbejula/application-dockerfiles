@@ -1,0 +1,112 @@
+## THIS IS A MULTI-STAGE DOCKERFILE FOR PHP APPLICATIONS. ##
+
+
+
+# ---------- Stage 1: Builder ----------
+FROM php:8.4.14-fpm-alpine AS builder
+
+WORKDIR /app
+ENV COMPOSER_ALLOW_SUPERUSER=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies
+RUN apk update && apk upgrade && \
+    apk add --no-cache \
+    $PHPIZE_DEPS \
+    build-base \
+    autoconf \
+    libtool \
+    libpng-dev \
+    libjpeg-turbo-dev \
+    freetype-dev \
+    zlib-dev \
+    oniguruma-dev \
+    libzip-dev \
+    librdkafka-dev \
+    curl \
+    git \
+    openssl-dev \
+    libxml2-dev \
+    linux-headers \
+    supervisor \
+    bash \
+    protobuf-dev \
+    protobuf
+
+# Install PHP extensions
+RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install -j$(nproc) \
+        pdo_mysql \
+        mbstring \
+        exif \
+        pcntl \
+        bcmath \
+        gd \
+        sockets \
+        zip \
+        mysqli
+
+# Install PECL extensions
+RUN pecl install rdkafka mongodb \
+    && docker-php-ext-enable rdkafka mongodb
+
+# Install Composer
+RUN curl -sS https://getcomposer.org/installer | php \
+ && mv composer.phar /usr/local/bin/composer
+
+# Copy app source
+COPY . /app
+
+# Install app dependencies
+RUN composer install --no-dev --no-interaction --optimize-autoloader --no-scripts
+
+
+# ---------- Stage 2: Runtime ----------
+FROM php:8.4.14-fpm-alpine
+
+WORKDIR /var/www/html
+
+RUN apk update && apk upgrade && \
+    apk add --no-cache \
+    nginx \
+    libzip \
+    librdkafka \
+    libpng \
+    libjpeg-turbo \
+    freetype \
+    libxml2 \
+    zlib \
+    bash \
+    supervisor \
+    curl \
+    openssl \
+    oniguruma
+
+# Copy from builder
+COPY --from=builder --chown=appuser:appuser /usr/local/lib/php/extensions /usr/local/lib/php/extensions
+COPY --from=builder /usr/local/etc/php/conf.d /usr/local/etc/php/conf.d
+COPY --from=builder /usr/local/bin/composer /usr/local/bin/composer
+COPY --from=builder --chown=appuser:appuser /app /var/www/html
+
+
+# Enable extensions
+RUN docker-php-ext-enable gd pdo pdo_mysql mysqli mbstring exif pcntl bcmath sockets zip rdkafka mongodb
+
+# # Enable only the PECL extensions that need explicit enabling
+# RUN docker-php-ext-enable rdkafka mongodb
+
+# Copy Supervisor config and entrypoint
+COPY supervisor/supervisord.conf /etc/supervisord.conf
+COPY ./start.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/start.sh
+
+# Enable listening on all interfaces
+RUN sed -i 's|listen = 127.0.0.1:9000|listen = 0.0.0.0:9000|' /usr/local/etc/php-fpm.d/www.conf
+
+# Configure NGINX
+# RUN rm /etc/nginx/sites-enabled/default
+COPY nginx.conf /etc/nginx/http.d/default.conf
+
+EXPOSE 80
+ENTRYPOINT ["start.sh"]
+CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisord.conf"]
